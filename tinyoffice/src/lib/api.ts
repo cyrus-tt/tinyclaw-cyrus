@@ -352,3 +352,25 @@ export function subscribeToEvents(
 
   return () => es.close();
 }
+
+export interface UsageRecord {
+  timestamp: number;
+  agentId: string;
+  agentName: string;
+  provider: string;
+  model: string;
+  harness: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd: number;
+}
+
+export async function getUsage(): Promise<UsageRecord[]> {
+  return apiFetch<UsageRecord[]>('/api/usage');
+}
+
+export async function clearUsage(): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>('/api/usage', { method: 'DELETE' });
+}

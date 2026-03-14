@@ -2,7 +2,29 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { AgentConfig, CustomProvider, TeamConfig } from './types';
-import { SCRIPT_DIR, resolveClaudeModel, resolveCodexModel, resolveOpenCodeModel, getSettings } from './config';
+import { SCRIPT_DIR, USAGE_FILE, resolveClaudeModel, resolveCodexModel, resolveOpenCodeModel, getSettings } from './config';
+
+interface UsageRecord {
+    timestamp: number;
+    agentId: string;
+    agentName: string;
+    provider: string;
+    model: string;
+    harness: string;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    cost_usd: number;
+}
+
+function appendUsage(record: UsageRecord): void {
+    try {
+        fs.appendFileSync(USAGE_FILE, JSON.stringify(record) + '\n', 'utf8');
+    } catch (e) {
+        // ignore
+    }
+}
 import { log } from './logging';
 import { ensureAgentDirectory, buildSystemPrompt } from './agent';
 
@@ -120,6 +142,7 @@ export async function invokeAgent(
 
     // Use model from custom provider if agent doesn't specify one
     const effectiveModel = agent.model || customProvider?.model || '';
+    const harness = customProvider?.harness || (provider === 'openai' ? 'codex' : provider === 'opencode' ? 'opencode' : 'claude');
 
     if (provider === 'openai') {
         log('INFO', `Using Codex CLI (agent: ${agentId})`);
@@ -145,14 +168,30 @@ export async function invokeAgent(
 
         const codexOutput = await runCommand('codex', codexArgs, workingDir, envOverrides);
 
-        // Parse JSONL output and extract final agent_message
+        // Parse JSONL output — extract agent_message and token usage
         let response = '';
+        const modelId_codex = customProvider ? effectiveModel : resolveCodexModel(effectiveModel);
         const lines = codexOutput.trim().split('\n');
         for (const line of lines) {
             try {
                 const json = JSON.parse(line);
                 if (json.type === 'item.completed' && json.item?.type === 'agent_message') {
                     response = json.item.text;
+                }
+                if (json.type === 'turn.completed' && json.usage) {
+                    appendUsage({
+                        timestamp: Date.now(),
+                        agentId,
+                        agentName: agent.name || agentId,
+                        provider: rawProvider,
+                        model: modelId_codex || effectiveModel,
+                        harness,
+                        input_tokens: json.usage.input_tokens || 0,
+                        output_tokens: json.usage.output_tokens || 0,
+                        cache_read_tokens: json.usage.cached_input_tokens || 0,
+                        cache_write_tokens: 0,
+                        cost_usd: 0,
+                    });
                 }
             } catch (e) {
                 // Ignore lines that aren't valid JSON
@@ -236,8 +275,34 @@ export async function invokeAgent(
         if (continueConversation) {
             claudeArgs.push('-c');
         }
+        claudeArgs.push('--output-format', 'json');
         claudeArgs.push('-p', message);
 
-        return await runCommand('claude', claudeArgs, workingDir, envOverrides);
+        const claudeOutput = await runCommand('claude', claudeArgs, workingDir, envOverrides);
+
+        let response = '';
+        try {
+            const json = JSON.parse(claudeOutput.trim());
+            response = json.result || '';
+            if (json.usage) {
+                appendUsage({
+                    timestamp: Date.now(),
+                    agentId,
+                    agentName: agent.name || agentId,
+                    provider: rawProvider,
+                    model: modelId || effectiveModel,
+                    harness,
+                    input_tokens: json.usage.input_tokens || 0,
+                    output_tokens: json.usage.output_tokens || 0,
+                    cache_read_tokens: json.usage.cache_read_input_tokens || 0,
+                    cache_write_tokens: json.usage.cache_creation_input_tokens || 0,
+                    cost_usd: json.total_cost_usd || 0,
+                });
+            }
+        } catch (e) {
+            response = claudeOutput.trim();
+        }
+
+        return response || 'Sorry, I could not generate a response.';
     }
 }

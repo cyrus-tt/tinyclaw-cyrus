@@ -11,7 +11,7 @@ import Image from "next/image";
 import {
   Plus, Hash, LayoutDashboard, ScrollText,
   Settings, SlidersHorizontal, ClipboardList, Building2,
-  FolderKanban, Swords,
+  FolderKanban, Swords, BarChart3,
 } from "lucide-react";
 
 export function Sidebar() {
@@ -39,6 +39,7 @@ export function Sidebar() {
           { href: "/tasks", label: "Tasks", icon: ClipboardList },
           { href: "/projects", label: "Projects", icon: FolderKanban },
           { href: "/logs", label: "Logs", icon: ScrollText },
+          { href: "/usage", label: "Token 用量", icon: BarChart3 },
         ].map(({ href, label, icon: Icon }) => {
           const active = href === "/" ? pathname === "/" : pathname.startsWith(href);
           return (
