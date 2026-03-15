@@ -49,6 +49,7 @@ async function processMessage(dbMsg: any): Promise<void> {
         files: dbMsg.files ? JSON.parse(dbMsg.files) : undefined,
         conversationId: dbMsg.conversation_id ?? undefined,
         fromAgent: dbMsg.from_agent ?? undefined,
+        topicId: dbMsg.topic_id ?? undefined,
     };
 
     const { channel, sender, message: rawMessage, messageId, agent: preRoutedAgent } = data;
@@ -102,10 +103,18 @@ async function processMessage(dbMsg: any): Promise<void> {
 
     ({ text: message } = await runIncomingHooks(message, { channel, sender, messageId, originalMessage: rawMessage }));
 
+    // Resolve topic-based working directory if applicable
+    const topicId = data.topicId;
+    let topicWorkingDir: string | undefined;
+    if (topicId && settings.topic_projects?.[topicId]) {
+        topicWorkingDir = settings.topic_projects[topicId].working_directory;
+        log('INFO', `Topic project resolved: topic=${topicId} → ${settings.topic_projects[topicId].name} (${topicWorkingDir})`);
+    }
+
     emitEvent('chain_step_start', { agentId, agentName: agent.name, fromAgent: data.fromAgent || null });
     let response: string;
     try {
-        response = await invokeAgent(agent, agentId, message, workspacePath, shouldReset, agents, teams);
+        response = await invokeAgent(agent, agentId, message, workspacePath, shouldReset, agents, teams, topicId, topicWorkingDir);
     } catch (error) {
         const provider = agent.provider || 'anthropic';
         const providerLabel = provider === 'openai' ? 'Codex' : provider === 'opencode' ? 'OpenCode' : 'Claude';
@@ -136,7 +145,7 @@ async function processMessage(dbMsg: any): Promise<void> {
     if (!handled) {
         await sendDirectResponse(response, {
             channel, sender, senderId: data.senderId,
-            messageId, originalMessage: rawMessage, agentId,
+            messageId, originalMessage: rawMessage, agentId, topicId,
         });
     }
 }
@@ -145,7 +154,7 @@ async function processMessage(dbMsg: any): Promise<void> {
 
 async function sendDirectResponse(
     response: string,
-    ctx: { channel: string; sender: string; senderId?: string | null; messageId: string; originalMessage: string; agentId: string }
+    ctx: { channel: string; sender: string; senderId?: string | null; messageId: string; originalMessage: string; agentId: string; topicId?: string }
 ): Promise<void> {
     await streamResponse(response, {
         channel: ctx.channel,
@@ -154,6 +163,7 @@ async function sendDirectResponse(
         messageId: ctx.messageId,
         originalMessage: ctx.originalMessage,
         agentId: ctx.agentId,
+        topicId: ctx.topicId,
     });
 }
 

@@ -27,7 +27,7 @@ export function initQueueDb(): void {
             message_id TEXT NOT NULL UNIQUE,
             channel TEXT NOT NULL, sender TEXT NOT NULL, sender_id TEXT,
             message TEXT NOT NULL, agent TEXT, files TEXT,
-            conversation_id TEXT, from_agent TEXT,
+            conversation_id TEXT, from_agent TEXT, topic_id TEXT,
             status TEXT NOT NULL DEFAULT 'pending',
             retry_count INTEGER NOT NULL DEFAULT 0, last_error TEXT,
             created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
@@ -67,6 +67,12 @@ export function initQueueDb(): void {
     if (!cols.some(c => c.name === 'metadata')) {
         db.exec('ALTER TABLE responses ADD COLUMN metadata TEXT');
     }
+
+    // Migrate: add topic_id column to messages if missing
+    const msgCols = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+    if (!msgCols.some(c => c.name === 'topic_id')) {
+        db.exec('ALTER TABLE messages ADD COLUMN topic_id TEXT');
+    }
 }
 
 function getDb(): Database.Database {
@@ -80,11 +86,11 @@ export function enqueueMessage(data: MessageJobData): number | null {
     const now = Date.now();
     try {
         const r = getDb().prepare(
-            `INSERT INTO messages (message_id,channel,sender,sender_id,message,agent,files,conversation_id,from_agent,status,created_at,updated_at)
-             VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?)`
+            `INSERT INTO messages (message_id,channel,sender,sender_id,message,agent,files,conversation_id,from_agent,topic_id,status,created_at,updated_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,?)`
         ).run(data.messageId, data.channel, data.sender, data.senderId ?? null, data.message,
             data.agent ?? null, data.files ? JSON.stringify(data.files) : null,
-            data.conversationId ?? null, data.fromAgent ?? null, now, now);
+            data.conversationId ?? null, data.fromAgent ?? null, data.topicId ?? null, now, now);
         queueEvents.emit('message:enqueued', { id: r.lastInsertRowid, agent: data.agent });
         return r.lastInsertRowid as number;
     } catch (err: any) {

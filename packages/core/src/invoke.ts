@@ -80,7 +80,9 @@ export async function invokeAgent(
     workspacePath: string,
     shouldReset: boolean,
     agents: Record<string, AgentConfig> = {},
-    teams: Record<string, TeamConfig> = {}
+    teams: Record<string, TeamConfig> = {},
+    topicId?: string,
+    topicWorkingDir?: string,
 ): Promise<string> {
     // Ensure agent directory exists with config files
     const agentDir = path.join(workspacePath, agentId);
@@ -93,12 +95,25 @@ export async function invokeAgent(
     // Build system prompt in-memory (built-in instructions + teammates + memory + user customization)
     const systemPrompt = buildSystemPrompt(agentId, agentDir, agents, teams, agent.system_prompt, agent.prompt_file);
 
-    // Resolve working directory
-    const workingDir = agent.working_directory
-        ? (path.isAbsolute(agent.working_directory)
-            ? agent.working_directory
-            : path.join(workspacePath, agent.working_directory))
-        : agentDir;
+    // Resolve working directory — topic projects override the default
+    let workingDir: string;
+    if (topicId && topicWorkingDir) {
+        // Topic-based session isolation: use the project's directory
+        workingDir = topicWorkingDir;
+        log('INFO', `Topic session isolation: topic=${topicId}, workingDir=${workingDir}`);
+    } else if (topicId) {
+        // Topic without explicit project mapping: isolate by subdirectory
+        const topicDir = path.join(agentDir, 'topics', topicId);
+        if (!fs.existsSync(topicDir)) fs.mkdirSync(topicDir, { recursive: true });
+        workingDir = topicDir;
+        log('INFO', `Topic session isolation (fallback): topic=${topicId}, workingDir=${workingDir}`);
+    } else {
+        workingDir = agent.working_directory
+            ? (path.isAbsolute(agent.working_directory)
+                ? agent.working_directory
+                : path.join(workspacePath, agent.working_directory))
+            : agentDir;
+    }
 
     const rawProvider = agent.provider || 'anthropic';
 
@@ -275,6 +290,14 @@ export async function invokeAgent(
         if (continueConversation) {
             claudeArgs.push('-c');
         }
+        // Apply per-agent tool restrictions (Claude CLI only)
+        if (agent.allowedTools && agent.allowedTools.length > 0) {
+            claudeArgs.push('--allowedTools', ...agent.allowedTools);
+        }
+        if (agent.disallowedTools && agent.disallowedTools.length > 0) {
+            claudeArgs.push('--disallowedTools', ...agent.disallowedTools);
+        }
+
         claudeArgs.push('--output-format', 'json');
         claudeArgs.push('-p', message);
 

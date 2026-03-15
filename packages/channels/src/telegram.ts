@@ -46,6 +46,7 @@ interface PendingMessage {
     chatId: number;
     messageId: number;
     timestamp: number;
+    topicThreadId?: number;
 }
 
 function sanitizeFileName(fileName: string): string {
@@ -290,8 +291,16 @@ bot.getMe().then(async (me: TelegramBot.User) => {
 // Message received - Write to queue
 bot.on('message', async (msg: TelegramBot.Message) => {
     try {
-        // Skip group/channel messages - only handle private chats
-        if (msg.chat.type !== 'private') {
+        // Accept private chats and supergroup topics; skip channels and non-topic groups
+        const isPrivate = msg.chat.type === 'private';
+        const isSupergroup = msg.chat.type === 'supergroup';
+        const topicThreadId = (msg as any).message_thread_id as number | undefined;
+
+        if (!isPrivate && !isSupergroup) {
+            return;
+        }
+        // In supergroups, only accept messages within topics (message_thread_id present)
+        if (isSupergroup && !topicThreadId) {
             return;
         }
 
@@ -363,7 +372,8 @@ bot.on('message', async (msg: TelegramBot.Message) => {
             : 'Unknown';
         const senderId = msg.chat.id.toString();
 
-        log('INFO', `Message from ${sender}: ${messageText.substring(0, 50)}${downloadedFiles.length > 0 ? ` [+${downloadedFiles.length} file(s)]` : ''}...`);
+        const topicLabel = topicThreadId ? ` [topic:${topicThreadId}]` : '';
+        log('INFO', `Message from ${sender}${topicLabel}: ${messageText.substring(0, 50)}${downloadedFiles.length > 0 ? ` [+${downloadedFiles.length} file(s)]` : ''}...`);
 
         const pairing = ensureSenderPaired(PAIRING_FILE, 'telegram', senderId, sender);
         if (!pairing.approved && pairing.code) {
@@ -471,6 +481,7 @@ bot.on('message', async (msg: TelegramBot.Message) => {
         }
 
         // Write to queue via API
+        const topicId = topicThreadId ? String(topicThreadId) : undefined;
         await fetch(`${API_BASE}/api/message`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -481,6 +492,7 @@ bot.on('message', async (msg: TelegramBot.Message) => {
                 message: fullMessage,
                 messageId: queueMessageId,
                 files: downloadedFiles.length > 0 ? downloadedFiles : undefined,
+                topicId,
             }),
         });
 
@@ -491,6 +503,7 @@ bot.on('message', async (msg: TelegramBot.Message) => {
             chatId: msg.chat.id,
             messageId: msg.message_id,
             timestamp: Date.now(),
+            topicThreadId: topicThreadId,
         });
 
         // Clean up old pending messages (older than 10 minutes)
@@ -531,21 +544,32 @@ async function checkOutgoingQueue(): Promise<void> {
                 const pending = pendingMessages.get(messageId);
                 const targetChatId = pending?.chatId ?? (senderId ? Number(senderId) : null);
 
+                // Determine topic thread_id for reply routing (from pending message or response metadata)
+                const replyTopicThreadId = pending?.topicThreadId
+                    ?? (resp.metadata?.topicId ? Number(resp.metadata.topicId) : undefined);
+
                 if (targetChatId && !Number.isNaN(targetChatId)) {
+                    // Build base options for topic-aware replies
+                    const topicOpts: TelegramBot.SendMessageOptions = {};
+                    if (replyTopicThreadId) {
+                        (topicOpts as any).message_thread_id = replyTopicThreadId;
+                    }
+
                     // Send any attached files first
                     if (files.length > 0) {
                         for (const file of files) {
                             try {
                                 if (!fs.existsSync(file)) continue;
                                 const ext = path.extname(file).toLowerCase();
+                                const fileOpts = { ...topicOpts };
                                 if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) {
-                                    await bot.sendPhoto(targetChatId, file);
+                                    await bot.sendPhoto(targetChatId, file, fileOpts as any);
                                 } else if (['.mp3', '.ogg', '.wav', '.m4a'].includes(ext)) {
-                                    await bot.sendAudio(targetChatId, file);
+                                    await bot.sendAudio(targetChatId, file, fileOpts as any);
                                 } else if (['.mp4', '.avi', '.mov', '.webm'].includes(ext)) {
-                                    await bot.sendVideo(targetChatId, file);
+                                    await bot.sendVideo(targetChatId, file, fileOpts as any);
                                 } else {
-                                    await bot.sendDocument(targetChatId, file);
+                                    await bot.sendDocument(targetChatId, file, fileOpts as any);
                                 }
                                 log('INFO', `Sent file to Telegram: ${path.basename(file)}`);
                             } catch (fileErr) {
@@ -560,14 +584,18 @@ async function checkOutgoingQueue(): Promise<void> {
                         const parseMode = resp.metadata?.parseMode as TelegramBot.ParseMode | undefined;
 
                         if (chunks.length > 0) {
-                            const opts: TelegramBot.SendMessageOptions = pending
-                                ? { reply_to_message_id: pending.messageId }
-                                : {};
+                            const opts: TelegramBot.SendMessageOptions = {
+                                ...topicOpts,
+                                ...(pending ? { reply_to_message_id: pending.messageId } : {}),
+                            };
                             if (parseMode) opts.parse_mode = parseMode;
                             await sendTelegramMessage(targetChatId, chunks[0]!, opts);
                         }
                         for (let i = 1; i < chunks.length; i++) {
-                            await sendTelegramMessage(targetChatId, chunks[i]!, parseMode ? { parse_mode: parseMode } : {});
+                            await sendTelegramMessage(targetChatId, chunks[i]!, {
+                                ...topicOpts,
+                                ...(parseMode ? { parse_mode: parseMode } : {}),
+                            });
                         }
                     }
 

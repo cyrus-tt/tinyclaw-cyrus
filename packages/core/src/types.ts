@@ -17,6 +17,8 @@ export interface AgentConfig {
         enabled?: boolean;
         interval?: number;
     };
+    allowedTools?: string[];     // Claude CLI --allowedTools (whitelist)
+    disallowedTools?: string[];  // Claude CLI --disallowedTools (blacklist)
 }
 
 export interface TeamConfig {
@@ -62,6 +64,7 @@ export interface Settings {
     monitoring?: {
         heartbeat_interval?: number;
     };
+    topic_projects?: Record<string, TopicProject>;
 }
 
 export interface MessageData {
@@ -155,6 +158,12 @@ export interface MessageJobData {
     files?: string[];
     conversationId?: string;
     fromAgent?: string;
+    topicId?: string;        // Telegram topic thread_id for session isolation
+}
+
+export interface TopicProject {
+    name: string;
+    working_directory: string;
 }
 
 export interface ResponseJobData {

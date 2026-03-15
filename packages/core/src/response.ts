@@ -57,6 +57,7 @@ export async function streamResponse(response: string, options: {
     originalMessage: string;
     agentId: string;
     transform?: (text: string) => string;
+    topicId?: string;
 }): Promise<void> {
     let finalResponse = response.trim();
 
@@ -76,6 +77,10 @@ export async function streamResponse(response: string, options: {
     });
     const { message: responseMessage, files: allFiles } = handleLongResponse(hookedResponse, outboundFiles);
 
+    // Merge hook metadata with topicId if present
+    const finalMetadata: Record<string, unknown> = { ...metadata };
+    if (options.topicId) finalMetadata.topicId = options.topicId;
+
     enqueueResponse({
         channel: options.channel,
         sender: options.sender,
@@ -85,7 +90,7 @@ export async function streamResponse(response: string, options: {
         messageId: options.messageId,
         agent: options.agentId,
         files: allFiles.length > 0 ? allFiles : undefined,
-        metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+        metadata: Object.keys(finalMetadata).length > 0 ? finalMetadata : undefined,
     });
 
     log('INFO', `Response ready [${options.channel}] ${options.sender} via agent:${options.agentId} (${finalResponse.length} chars)`);

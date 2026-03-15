@@ -69,7 +69,7 @@ export function enqueueInternalMessage(
     fromAgent: string,
     targetAgent: string,
     message: string,
-    originalData: { channel: string; sender: string; senderId?: string | null; messageId: string }
+    originalData: { channel: string; sender: string; senderId?: string | null; messageId: string; topicId?: string }
 ): void {
     const messageId = `internal_${conversationId}_${targetAgent}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     enqueueMessage({
@@ -81,6 +81,7 @@ export function enqueueInternalMessage(
         agent: targetAgent,
         conversationId,
         fromAgent,
+        topicId: originalData.topicId,
     });
     log('INFO', `Enqueued internal message: @${fromAgent} → @${targetAgent}`);
 }
@@ -267,6 +268,7 @@ export async function handleTeamResponse(params: {
         channel, sender, senderId: data.senderId ?? undefined,
         messageId, originalMessage: data.message, agentId,
         transform: (text) => convertTagsToReadable(text, agentId),
+        topicId: data.topicId,
     });
 
     // Check for teammate mentions — forward to teammates if under message limit
@@ -287,7 +289,7 @@ export async function handleTeamResponse(params: {
 
             const internalMsg = `[Message from teammate @${agentId}]:\n${mention.message}`;
             enqueueInternalMessage(conv.id, agentId, mention.teammateId, internalMsg, {
-                channel, sender, senderId: data.senderId, messageId,
+                channel, sender, senderId: data.senderId, messageId, topicId: data.topicId,
             });
         }
     } else if (teammateMentions.length > 0) {
