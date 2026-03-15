@@ -291,17 +291,22 @@ bot.getMe().then(async (me: TelegramBot.User) => {
 // Message received - Write to queue
 bot.on('message', async (msg: TelegramBot.Message) => {
     try {
-        // Accept private chats and supergroup topics; skip channels and non-topic groups
+        // Accept private chats, groups, and supergroups (with or without topics)
         const isPrivate = msg.chat.type === 'private';
-        const isSupergroup = msg.chat.type === 'supergroup';
+        const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
         const topicThreadId = (msg as any).message_thread_id as number | undefined;
 
-        if (!isPrivate && !isSupergroup) {
-            return;
+        if (!isPrivate && !isGroup) {
+            return; // Skip channels only
         }
-        // In supergroups, only accept messages within topics (message_thread_id present)
-        if (isSupergroup && !topicThreadId) {
-            return;
+
+        // In groups without topics, bot must be @mentioned to respond
+        if (isGroup && !topicThreadId) {
+            const rawText = msg.text || msg.caption || '';
+            const botUsername = (await bot.getMe()).username;
+            if (botUsername && !rawText.includes(`@${botUsername}`)) {
+                return; // Ignore non-mentioned messages in groups without topics
+            }
         }
 
         // Determine message text and any media files
