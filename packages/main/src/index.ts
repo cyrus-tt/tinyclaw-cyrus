@@ -13,7 +13,7 @@ import {
     getSettings, getAgents, getTeams, LOG_FILE, CHATS_DIR, FILES_DIR,
     log, emitEvent,
     parseAgentRouting, getAgentResetFlag,
-    invokeAgent,
+    invokeAgent, AgentInvocationError,
     loadPlugins, runIncomingHooks,
     streamResponse,
     initQueueDb, getPendingAgents, claimAllPendingMessages,
@@ -114,12 +114,21 @@ async function processMessage(dbMsg: any): Promise<void> {
     emitEvent('chain_step_start', { agentId, agentName: agent.name, fromAgent: data.fromAgent || null });
     let response: string;
     try {
-        response = await invokeAgent(agent, agentId, message, workspacePath, shouldReset, agents, teams, topicId, topicWorkingDir);
+        response = await invokeAgent(agent, agentId, message, workspacePath, shouldReset, agents, teams, topicId, topicWorkingDir, data.messageId);
     } catch (error) {
         const provider = agent.provider || 'anthropic';
         const providerLabel = provider === 'openai' ? 'Codex' : provider === 'opencode' ? 'OpenCode' : 'Claude';
         log('ERROR', `${providerLabel} error (agent: ${agentId}): ${(error as Error).message}`);
-        response = "Sorry, I encountered an error processing your request. Please check the queue logs.";
+        emitEvent('agent_error', {
+            agentId,
+            agentName: agent.name,
+            provider,
+            error: (error as Error).message,
+            messageId,
+        });
+        response = error instanceof AgentInvocationError
+            ? error.userMessage
+            : `${agent.name} 执行失败，请稍后重试。`;
     }
     emitEvent('chain_step_done', { agentId, agentName: agent.name, responseLength: response.length, responseText: response });
 

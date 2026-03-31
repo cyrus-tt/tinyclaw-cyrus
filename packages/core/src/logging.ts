@@ -1,10 +1,12 @@
 import fs from 'fs';
+import path from 'path';
 import { LOG_FILE } from './config';
 
 export function log(level: string, message: string): void {
     const timestamp = new Date().toISOString();
     const logMessage = `[${timestamp}] [${level}] ${message}\n`;
     console.log(logMessage.trim());
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
     fs.appendFileSync(LOG_FILE, logMessage);
 }
 

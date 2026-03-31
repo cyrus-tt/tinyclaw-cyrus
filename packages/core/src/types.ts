@@ -1,6 +1,6 @@
 export interface CustomProvider {
     name: string;
-    harness: 'claude' | 'codex';  // which CLI to invoke
+    harness: 'claude' | 'codex' | 'opencode';  // which CLI to invoke
     base_url: string;
     api_key: string;
     model?: string;               // model name to pass to the CLI
@@ -49,6 +49,7 @@ export interface Settings {
         anthropic?: {
             model?: string;
             auth_token?: string;
+            oauth_token?: string;
         };
         openai?: {
             model?: string;
@@ -65,6 +66,10 @@ export interface Settings {
         heartbeat_interval?: number;
     };
     topic_projects?: Record<string, TopicProject>;
+    memory?: {
+        memos_api_key?: string;
+        user_id?: string;   // defaults to "cyrus"
+    };
 }
 
 export interface MessageData {

@@ -13,9 +13,16 @@ import fs from 'fs';
 import path from 'path';
 import https from 'https';
 import http from 'http';
+import { execFileSync } from 'child_process';
 import { ensureSenderPaired } from '@tinyclaw/core';
 import { createSSEClient } from './sse-client';
 import { applyDefaultAgent } from './default-agent';
+import {
+    DEFAULT_GITHUB_BASE,
+    resolveProjectLocalPath,
+    sanitizeTopicDisplayName,
+    validateRepoName,
+} from './project-command';
 
 const API_PORT = parseInt(process.env.TINYCLAW_API_PORT || '3777', 10);
 const API_BASE = `http://localhost:${API_PORT}`;
@@ -264,29 +271,70 @@ function pairingMessage(code: string): string {
 // This keeps the polling loop bounded; the watchdog handles stale connections.
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
     polling: {
-        autoStart: true,
+        autoStart: false,
         params: { timeout: 25 },
     },
 });
 
-// Bot ready
-bot.getMe().then(async (me: TelegramBot.User) => {
-    log('INFO', `Telegram bot connected as @${me.username}`);
-    lastPollingActivity = Date.now();
+let botReadyLogged = false;
+let botCommandsRegistered = false;
+let botUsername: string | null = null;
 
-    // Register bot commands so they appear in Telegram's "/" menu
-    await bot.setMyCommands([
-        { command: 'agent', description: 'List available agents' },
-        { command: 'team', description: 'List available teams' },
-        { command: 'reset', description: 'Reset conversation history' },
-        { command: 'restart', description: 'Restart TinyClaw' },
-    ]).catch((err: Error) => log('WARN', `Failed to register commands: ${err.message}`));
+async function ensureBotMetadata(): Promise<void> {
+    try {
+        const me = await bot.getMe();
+        lastPollingActivity = Date.now();
+        botUsername = me.username || null;
 
-    log('INFO', 'Listening for messages...');
-}).catch((err: Error) => {
-    log('ERROR', `Failed to connect: ${err.message}`);
-    process.exit(1);
-});
+        if (!botReadyLogged) {
+            log('INFO', `Telegram bot connected as @${me.username}`);
+            log('INFO', 'Listening for messages...');
+            botReadyLogged = true;
+        }
+
+        if (!botCommandsRegistered) {
+            await bot.setMyCommands([
+                { command: 'agent', description: 'List available agents' },
+                { command: 'team', description: 'List available teams' },
+                { command: 'newproject', description: '创建新项目 (仓库名 Topic名)' },
+                { command: 'reset', description: 'Reset conversation history' },
+                { command: 'restart', description: 'Restart TinyClaw' },
+            ]).catch((err: Error) => log('WARN', `Failed to register commands: ${err.message}`));
+            botCommandsRegistered = true;
+        }
+    } catch (err) {
+        // Do not kill the process on a transient startup failure.
+        // Polling may still recover and receive messages shortly after boot.
+        log('ERROR', `Failed to connect: ${(err as Error).message}`);
+    }
+}
+
+async function getBotUsername(): Promise<string | null> {
+    if (botUsername) {
+        return botUsername;
+    }
+    await ensureBotMetadata();
+    return botUsername;
+}
+
+async function startPollingWithRetry(context: string): Promise<void> {
+    let attempt = 0;
+    while (true) {
+        try {
+            log('INFO', `Starting polling (${context}, attempt ${attempt + 1})...`);
+            await bot.startPolling();
+            lastPollingActivity = Date.now();
+            await ensureBotMetadata();
+            log('INFO', 'Polling started successfully');
+            return;
+        } catch (error) {
+            attempt++;
+            const backoff = Math.min(5000 * attempt, 60000);
+            log('ERROR', `Failed to start polling: ${(error as Error).message} — retrying in ${backoff / 1000}s`);
+            await new Promise(resolve => setTimeout(resolve, backoff));
+        }
+    }
+}
 
 // Message received - Write to queue
 bot.on('message', async (msg: TelegramBot.Message) => {
@@ -303,8 +351,8 @@ bot.on('message', async (msg: TelegramBot.Message) => {
         // In groups without topics, bot must be @mentioned to respond
         if (isGroup && !topicThreadId) {
             const rawText = msg.text || msg.caption || '';
-            const botUsername = (await bot.getMe()).username;
-            if (botUsername && !rawText.includes(`@${botUsername}`)) {
+            const currentBotUsername = await getBotUsername();
+            if (currentBotUsername && !rawText.includes(`@${currentBotUsername}`)) {
                 return; // Ignore non-mentioned messages in groups without topics
             }
         }
@@ -451,6 +499,109 @@ bot.on('message', async (msg: TelegramBot.Message) => {
             return;
         }
 
+        // Check for newproject command: /newproject <repo-name> <topic-display-name>
+        const newProjectMatch = messageText.trim().match(/^[!/]newproject\s+(\S+)\s+(.+)$/i);
+        if (messageText.trim().match(/^[!/]newproject$/i)) {
+            await bot.sendMessage(msg.chat.id, '用法: /newproject <仓库名> <Topic名称>\n例如: /newproject cut2 剪辑第二季', {
+                reply_to_message_id: msg.message_id,
+            });
+            return;
+        }
+        if (newProjectMatch && isGroup) {
+            const repoName = newProjectMatch[1]!;
+            // Strip @bot_mention from topic name (user may append @tinyclaw0_bot in groups)
+            const repoError = validateRepoName(repoName);
+            if (repoError) {
+                await bot.sendMessage(msg.chat.id, `❌ 仓库名不合法：${repoError}`, {
+                    reply_to_message_id: msg.message_id,
+                });
+                return;
+            }
+
+            const topicDisplayName = sanitizeTopicDisplayName(newProjectMatch[2]!);
+            const localPath = resolveProjectLocalPath(DEFAULT_GITHUB_BASE, repoName);
+
+            log('INFO', `/newproject command: repo=${repoName}, topic=${topicDisplayName}`);
+            const statusLines: string[] = [];
+
+            try {
+                // 1. Create local directory + git init
+                if (fs.existsSync(localPath)) {
+                    statusLines.push(`⚠️ 本地目录已存在: ${localPath}`);
+                } else {
+                    fs.mkdirSync(localPath, { recursive: true });
+                    execFileSync('git', ['init'], { cwd: localPath, stdio: 'pipe', timeout: 15000 });
+                    // Create initial README
+                    fs.writeFileSync(path.join(localPath, 'README.md'), `# ${topicDisplayName}\n`);
+                    execFileSync('git', ['add', '.'], { cwd: localPath, stdio: 'pipe', timeout: 15000 });
+                    execFileSync('git', ['commit', '-m', 'Initial commit'], { cwd: localPath, stdio: 'pipe', timeout: 15000 });
+                    statusLines.push(`✅ 本地仓库: ${localPath}`);
+                }
+
+                // 2. Create GitHub remote repo
+                try {
+                    execFileSync('gh', ['repo', 'create', repoName, '--private', '--source=.', '--push'], {
+                        cwd: localPath,
+                        stdio: 'pipe',
+                        timeout: 30000,
+                    });
+                    statusLines.push(`✅ GitHub 仓库: ${repoName} (private)`);
+                } catch (ghErr) {
+                    const ghMsg = (ghErr as Error).message || '';
+                    if (ghMsg.includes('already exists')) {
+                        statusLines.push(`⚠️ GitHub 仓库已存在: ${repoName}`);
+                    } else {
+                        statusLines.push(`❌ GitHub 创建失败: ${ghMsg.substring(0, 100)}`);
+                    }
+                }
+
+                // 3. Create Telegram Forum Topic
+                const chatId = msg.chat.id;
+                const createTopicUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/createForumTopic`;
+                const topicRes = await fetch(createTopicUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_id: chatId, name: topicDisplayName }),
+                });
+                const topicData = await topicRes.json() as any;
+
+                if (!topicData.ok) {
+                    statusLines.push(`❌ Topic 创建失败: ${topicData.description || 'unknown error'}`);
+                    await bot.sendMessage(chatId, statusLines.join('\n'), { reply_to_message_id: msg.message_id });
+                    return;
+                }
+
+                const threadId = topicData.result.message_thread_id;
+                statusLines.push(`✅ Topic 已创建: 「${topicDisplayName}」(thread_id: ${threadId})`);
+
+                // 4. Update settings.json with topic_projects mapping
+                const settingsData = fs.readFileSync(SETTINGS_FILE, 'utf8');
+                const settings = JSON.parse(settingsData);
+                if (!settings.topic_projects) settings.topic_projects = {};
+                settings.topic_projects[String(threadId)] = {
+                    name: topicDisplayName,
+                    working_directory: localPath,
+                };
+                fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n');
+                statusLines.push(`✅ 配置已写入 settings.json`);
+
+                statusLines.push(`\n🎉 项目「${topicDisplayName}」创建完成！去 Topic 里发消息即可开始工作。`);
+                await bot.sendMessage(chatId, statusLines.join('\n'), { reply_to_message_id: msg.message_id });
+                log('INFO', `Project created: ${repoName} → topic ${threadId} → ${localPath}`);
+            } catch (err) {
+                statusLines.push(`❌ 错误: ${(err as Error).message}`);
+                await bot.sendMessage(msg.chat.id, statusLines.join('\n'), { reply_to_message_id: msg.message_id });
+                log('ERROR', `/newproject failed: ${(err as Error).message}`);
+            }
+            return;
+        }
+        if (newProjectMatch && !isGroup) {
+            await bot.sendMessage(msg.chat.id, '⚠️ /newproject 只能在群组中使用（需要创建 Topic）', {
+                reply_to_message_id: msg.message_id,
+            });
+            return;
+        }
+
         // Check for restart command
         if (messageText.trim().match(/^[!/]restart$/i)) {
             log('INFO', 'Restart command received');
@@ -487,7 +638,7 @@ bot.on('message', async (msg: TelegramBot.Message) => {
 
         // Write to queue via API
         const topicId = topicThreadId ? String(topicThreadId) : undefined;
-        await fetch(`${API_BASE}/api/message`, {
+        const enqueueRes = await fetch(`${API_BASE}/api/message`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -500,6 +651,10 @@ bot.on('message', async (msg: TelegramBot.Message) => {
                 topicId,
             }),
         });
+        if (!enqueueRes.ok) {
+            const detail = await enqueueRes.text().catch(() => enqueueRes.statusText);
+            throw new Error(`Queue API request failed (${enqueueRes.status}): ${detail.slice(0, 200)}`);
+        }
 
         log('INFO', `Queued message ${queueMessageId}`);
 
@@ -521,6 +676,15 @@ bot.on('message', async (msg: TelegramBot.Message) => {
 
     } catch (error) {
         log('ERROR', `Message handling error: ${(error as Error).message}`);
+        if (msg.chat?.id) {
+            await bot.sendMessage(
+                msg.chat.id,
+                'TinyClaw 当前未能接收这条消息，队列或网络异常，请稍后重试。',
+                { reply_to_message_id: msg.message_id },
+            ).catch(() => {
+                // Ignore secondary Telegram delivery failures
+            });
+        }
     }
 });
 
@@ -666,12 +830,7 @@ async function restartPolling(reason: string, delayMs = 5000): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, delayMs));
 
     try {
-        log('INFO', `Restarting polling (${reason})...`);
-        await bot.startPolling();
-        lastPollingActivity = Date.now();
-        log('INFO', 'Polling restarted successfully');
-    } catch (e) {
-        log('ERROR', `Failed to restart polling: ${(e as Error).message}`);
+        await startPollingWithRetry(reason);
     } finally {
         pollingRestartInProgress = false;
     }
@@ -739,3 +898,4 @@ process.on('SIGTERM', () => {
 
 // Start
 log('INFO', 'Starting Telegram client...');
+void startPollingWithRetry('initial startup');
