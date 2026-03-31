@@ -123,8 +123,8 @@ start_daemon() {
     echo ""
 
     # --- Build tmux session dynamically ---
-    # Total panes = N channels + 2 (queue, heartbeat)
-    local total_panes=$(( ${#ACTIVE_CHANNELS[@]} + 2 ))
+    # Total panes = N channels + 1 (queue). Heartbeat disabled — use per-agent override if needed.
+    local total_panes=$(( ${#ACTIVE_CHANNELS[@]} + 1 ))
 
     tmux new-session -d -s "$TMUX_SESSION" -n "tinyclaw" -c "$SCRIPT_DIR"
 
@@ -160,9 +160,11 @@ start_daemon() {
     tmux select-pane -t "$TMUX_SESSION:${win_base}.$pane_idx" -T "Queue"
     pane_idx=$((pane_idx + 1))
 
-    # Heartbeat pane
-    tmux send-keys -t "$TMUX_SESSION:${win_base}.$pane_idx" "cd '$SCRIPT_DIR' && ./lib/heartbeat-cron.sh" C-m
-    tmux select-pane -t "$TMUX_SESSION:${win_base}.$pane_idx" -T "Heartbeat"
+    # Heartbeat disabled — no longer started automatically.
+    # To re-enable, uncomment:
+    # pane_idx=$((pane_idx + 1))
+    # tmux send-keys -t "$TMUX_SESSION:${win_base}.$pane_idx" "cd '$SCRIPT_DIR' && ./lib/heartbeat-cron.sh" C-m
+    # tmux select-pane -t "$TMUX_SESSION:${win_base}.$pane_idx" -T "Heartbeat"
 
     echo ""
     echo -e "${GREEN}✓ TinyClaw started${NC}"
@@ -354,7 +356,20 @@ status_daemon() {
     echo ""
     echo "Recent Heartbeats:"
     printf '%0.s─' {1..18}; echo ""
-    tail -n 3 "$LOG_DIR/heartbeat.log" 2>/dev/null || echo "  No heartbeat logs yet"
+    local heartbeat_log="$LOG_DIR/heartbeat.log"
+    if [ -f "$heartbeat_log" ]; then
+        local now_ts
+        local heartbeat_ts
+        now_ts=$(date +%s)
+        heartbeat_ts=$(stat -f %m "$heartbeat_log" 2>/dev/null || echo 0)
+        if pgrep -f "heartbeat-cron.sh" > /dev/null || [ $((now_ts - heartbeat_ts)) -le 86400 ]; then
+            tail -n 3 "$heartbeat_log"
+        else
+            echo "  No recent heartbeat activity"
+        fi
+    else
+        echo "  No heartbeat logs yet"
+    fi
 
     echo ""
     echo "Logs:"
